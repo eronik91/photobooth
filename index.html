@@ -239,7 +239,9 @@ const EMOJIFONT='"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-se
 const db=new Promise((ok,no)=>{try{const r=indexedDB.open('photobooth',2);r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains('p'))d.createObjectStore('p',{autoIncrement:true});if(!d.objectStoreNames.contains('kv'))d.createObjectStore('kv')};r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)}catch(e){no(e)}});
 const kvGet=async k=>{try{const d=await db;return await new Promise(ok=>{const q=d.transaction('kv').objectStore('kv').get(k);q.onsuccess=()=>ok(q.result);q.onerror=()=>ok()})}catch(e){}};
 const kvSet=async(k,v)=>{try{const d=await db;d.transaction('kv','readwrite').objectStore('kv').put(v,k)}catch(e){}};
-async function put(b){try{const d=await db;d.transaction('p','readwrite').objectStore('p').add({b,t:Date.now()})}catch(e){}}
+async function put(b){const d=await db;return await new Promise((ok,no)=>{const tx=d.transaction('p','readwrite'),q=tx.objectStore('p').add({b,t:Date.now(),cloudinary:null});q.onsuccess=()=>ok(q.result);q.onerror=()=>no(q.error);tx.onerror=()=>no(tx.error)})}
+async function getPhoto(key){if(key==null)return null;const d=await db;return await new Promise((ok,no)=>{const q=d.transaction('p').objectStore('p').get(key);q.onsuccess=()=>ok(q.result||null);q.onerror=()=>no(q.error)})}
+async function updatePhoto(key,patch){if(key==null)return;const d=await db;return await new Promise((ok,no)=>{const tx=d.transaction('p','readwrite'),st=tx.objectStore('p'),q=st.get(key);q.onsuccess=()=>{if(!q.result){ok(false);return}st.put({...q.result,...patch},key)};q.onerror=()=>no(q.error);tx.oncomplete=()=>ok(true);tx.onerror=()=>no(tx.error)})}
 
 /* ---------- fonts ---------- */
 const BUILTIN_FONTS=['Bebas Neue','Montserrat','Playfair Display','Pacifico','Great Vibes','Lobster','Permanent Marker','Fredoka','Cairo','Georgia','Impact','system-ui'];
@@ -417,27 +419,38 @@ const crc=b=>{let c=0xFFFFFFFF;for(const x of b)c=CT[(c^x)&255]^(c>>>8);return(c
 async function withDpi(blob){const buf=new Uint8Array(await blob.arrayBuffer()),ph=new Uint8Array(21),dv=new DataView(ph.buffer);
  dv.setUint32(0,9);ph.set([112,72,89,115],4);dv.setUint32(8,11811);dv.setUint32(12,11811);ph[16]=1;dv.setUint32(17,crc(ph.subarray(4,17)));
  const out=new Uint8Array(buf.length+21);out.set(buf.subarray(0,33));out.set(ph,33);out.set(buf.subarray(33),54);return new Blob([out],{type:'image/png'})}
+let savedPhotoKey=null;
 const outBlob=()=>{paint(false);return new Promise(r=>O.toBlob(async b=>{paint(true);r(await withDpi(b))},'image/png'))};
-async function finalBlob(){if(!savedBlob){savedBlob=await outBlob();await put(savedBlob)}return savedBlob}
-$('#save').onclick=async()=>{const b=await finalBlob();dl(b,'photobooth-'+Date.now()+'.png');confetti();if(canQR()&&S.qrAuto)showQR(b)};
-$('#qrbtn').onclick=async()=>showQR(await finalBlob());
+async function finalBlob(){if(!savedBlob){savedBlob=await outBlob();savedPhotoKey=await put(savedBlob)}return savedBlob}
+$('#save').onclick=async()=>{const b=await finalBlob();dl(b,'photobooth-'+Date.now()+'.png');confetti();if(canQR()&&S.qrAuto)showQR(b,savedPhotoKey)};
+$('#qrbtn').onclick=async()=>showQR(await finalBlob(),savedPhotoKey);
 $('#prt').onclick=async()=>{const b=await finalBlob(),land=O.width>O.height,i=new Image();$('#print').innerHTML='';
  $('#pg').textContent=`@page{size:${land?'6in 4in':'4in 6in'};margin:0}@media print{#print img{width:${land?'6in':'4in'};height:${land?'4in':'6in'}}}`;i.onload=()=>print();i.src=URL.createObjectURL(b);$('#print').appendChild(i)};
 $('#shr').onclick=async()=>{const b=await finalBlob(),f=new File([b],'photobooth.png',{type:'image/png'});if(navigator.canShare?.({files:[f]}))try{await navigator.share({files:[f],title:S.title})}catch(e){}else dl(b,'photobooth-'+Date.now()+'.png')};
-$('#done').onclick=()=>{shots=[];show('home')};
+$('#done').onclick=()=>{shots=[];savedBlob=null;savedPhotoKey=null;show('home')};
 
 /* ---------- QR via Cloudinary unsigned upload ---------- */
 const canQR=()=>!!(S.cloud&&S.preset);
 async function toJpeg(b){const bm=await createImageBitmap(b),c=document.createElement('canvas');c.width=bm.width;c.height=bm.height;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(bm,0,0);return new Promise(r=>c.toBlob(r,'image/jpeg',.92))}
+const uploadInFlight=new Map();
 async function upload(blob){const f=new FormData();f.append('file',blob,'photobooth.jpg');f.append('upload_preset',S.preset.trim());
  let r;try{r=await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(S.cloud.trim())}/image/upload`,{method:'POST',body:f})}catch(e){throw new Error('Upload failed — check the internet connection.')}
- const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error((j.error&&j.error.message)||'Upload failed — check the Cloudinary settings in Admin.');return j.secure_url}
-async function showQR(blob){const d=$('#qr'),b=$('#qrbody');if(!canQR()){alert('Add your Cloudinary cloud name and upload preset in Admin → QR code.');return}
- if(!d.open)d.showModal();b.innerHTML='<div style="font-size:2.4rem">⏳</div><div>Uploading your photo…</div>';
- try{if(!navigator.onLine)throw new Error('No internet connection. Your photo is saved in the Gallery — open it there later to get the QR.');
-  const url=await upload(await toJpeg(blob)),qr=qrcode(0,'M');qr.addData(url);qr.make();
+ const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error((j.error&&j.error.message)||'Upload failed — check the Cloudinary settings in Admin.');
+ if(!j.secure_url||!j.public_id)throw new Error('Cloudinary did not return the photo URL and public ID. Check your upload preset.');
+ return {secure_url:j.secure_url,public_id:j.public_id,asset_id:j.asset_id||'',format:j.format||'jpg',bytes:j.bytes||blob.size,uploaded_at:Date.now()}}
+async function ensureCloudinaryPhoto(blob,key){
+ if(key==null)throw new Error('This photo is not saved in the local Gallery. Save it first, then request its QR code.');
+ const existing=await getPhoto(key);if(existing?.cloudinary?.secure_url)return existing.cloudinary.secure_url;
+ if(uploadInFlight.has(key))return uploadInFlight.get(key);
+ const task=(async()=>{if(!navigator.onLine)throw new Error('No internet connection. Your photo remains saved in the Gallery. Reconnect and try again.');
+  const metadata=await upload(await toJpeg(blob));await updatePhoto(key,{cloudinary:metadata});return metadata.secure_url})();
+ uploadInFlight.set(key,task);try{return await task}finally{uploadInFlight.delete(key)}
+}
+async function showQR(blob,key){const d=$('#qr'),b=$('#qrbody');if(!canQR()){alert('Add your Cloudinary cloud name and upload preset in Admin → QR code.');return}
+ if(!d.open)d.showModal();b.innerHTML='<div style="font-size:2.4rem">⏳</div><div>Preparing your photo QR…</div>';
+ try{const url=await ensureCloudinaryPhoto(blob,key),qr=qrcode(0,'M');qr.addData(url);qr.make();
   b.innerHTML=`<img id="qrimg" alt="QR code" src="${qr.createDataURL(8,32)}"><div>Scan with your phone camera,<br>then press &amp; hold the photo to save it.</div><div class="hint" style="word-break:break-all">${esc(url)}</div>`;
- }catch(err){b.innerHTML=`<div style="font-size:2.4rem">⚠️</div><div>${esc(err.message||err)}</div><button class="btn sm" id="qrretry">Try again</button>`;$('#qrretry').onclick=()=>showQR(blob)}}
+ }catch(err){b.innerHTML=`<div style="font-size:2.4rem">⚠️</div><div>${esc(err.message||err)}</div><button class="btn sm" id="qrretry">Try again</button>`;$('#qrretry').onclick=()=>showQR(blob,key)}}
 $('#qrx').onclick=()=>$('#qr').close();
 
 /* ---------- gallery ---------- */
@@ -445,12 +458,12 @@ let cur=null;
 async function gal(){show('gal');const g=$('#grid');g.innerHTML='';
  try{const d=await db,t=d.transaction('p'),s=t.objectStore('p'),v=s.getAll(),k=s.getAllKeys();
   t.oncomplete=()=>{if(!v.result.length)g.innerHTML='<p style="opacity:.7">No photos yet — go make some memories! 📸</p>';
-   v.result.map((x,i)=>[k.result[i],x]).reverse().forEach(([key,x])=>{const im=new Image(),u=URL.createObjectURL(x.b);im.src=u;im.onclick=()=>{cur={key,b:x.b};$('#vimg').src=u;$('#vqr').style.display=canQR()?'':'none';$('#view').showModal()};g.appendChild(im)})}
+   v.result.map((x,i)=>[k.result[i],x]).reverse().forEach(([key,x])=>{const im=new Image(),u=URL.createObjectURL(x.b);im.src=u;im.onclick=()=>{cur={key,b:x.b,record:x};$('#vimg').src=u;$('#vqr').style.display=canQR()?'':'none';$('#view').showModal()};g.appendChild(im)})}
  }catch(e){g.textContent='Gallery unavailable in this browser.'}}
 $('#bgal').onclick=gal;$('#gback').onclick=()=>show('home');$('#vx').onclick=()=>$('#view').close();
 $('#vdl').onclick=()=>dl(cur.b,'photobooth-'+cur.key+'.png');
-$('#vqr').onclick=()=>showQR(cur.b);
-$('#vdel').onclick=async()=>{const d=await db;d.transaction('p','readwrite').objectStore('p').delete(cur.key).onsuccess=()=>{$('#view').close();gal()}};
+$('#vqr').onclick=()=>showQR(cur.b,cur.key);
+$('#vdel').onclick=async()=>{if(!confirm('Delete this photo from the local Gallery? Its Cloudinary copy will remain online permanently.'))return;const d=await db;d.transaction('p','readwrite').objectStore('p').delete(cur.key).onsuccess=()=>{$('#view').close();gal()}};
 
 /* ---------- admin ---------- */
 function fillAdmin(){$('#laysel').innerHTML=tpls.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('');$$('#admin [data-k]').forEach(i=>{const v=S[i.dataset.k];i.type==='checkbox'?i.checked=v:i.value=v})}
@@ -459,7 +472,7 @@ $('#gear').onclick=()=>{const p=prompt('Admin PIN:');if(p===null)return;if(p===S
 $('#aclose').onclick=()=>$('#admin').close();
 $('#logoup').onclick=()=>uploadLogo();$('#logoclr').onclick=()=>setLogo('');
 $('#bgup').onclick=()=>pick('image/*',f=>readImg(f,1600,d=>{const im=new Image();im.onload=()=>{bgImg=im;S.bg=9;persist();fillAdmin()};im.src=d}));
-$('#clr').onclick=async()=>{if(!confirm('Delete ALL photos in the gallery?'))return;const d=await db;d.transaction('p','readwrite').objectStore('p').clear()};
+$('#clr').onclick=async()=>{if(!confirm('Delete all local Gallery photos? Cloudinary copies will remain online and must be deleted manually in Cloudinary. Continue?'))return;const d=await db;d.transaction('p','readwrite').objectStore('p').clear()};
 $('#opened').onclick=()=>{$('#admin').close();openEditor()};
 
 /* ---------- LAYOUT EDITOR ---------- */
